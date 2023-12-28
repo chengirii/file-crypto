@@ -6,13 +6,14 @@ import (
 	"encoding/hex"
 	"fmt"
 	ecies "github.com/ecies/go/v2"
+	"github.com/schollz/progressbar/v3"
 	"os"
 	"path/filepath"
 	"strings"
 )
 
 const (
-	eachEncryptLen   = 1024 * 1024 * 100 // Unencrypted 1 byte, encrypted to 32 bytes  100MB
+	eachEncryptLen   = 1024 * 1024 * 10 // Unencrypted 1 byte, encrypted to 32 bytes  100MB
 	aesKeySize       = 32
 	encryptedFileExt = ".cc"
 	decryptedFileExt = "decrypted_"
@@ -50,6 +51,7 @@ func EncryptFile(filePath string, publicKeyHex string) error {
 	// For 16, 24, and 32-bit strings, they correspond to AES-128, AES-192, and AES-256 encryption methods, respectively
 
 	buffer := make([]byte, eachEncryptLen)
+	bar := progressbar.Default(forNum)
 	for i := int64(0); i < forNum; i++ {
 		n, err := f.Read(buffer)
 		if err != nil {
@@ -61,7 +63,7 @@ func EncryptFile(filePath string, publicKeyHex string) error {
 		}
 		writer.WriteString(encryptedData)
 		writer.Flush()
-
+		bar.Add(1)
 	}
 	// writer Last
 	publicKey, _ := ecies.NewPublicKeyFromHex(publicKeyHex)
@@ -76,6 +78,7 @@ func EncryptFile(filePath string, publicKeyHex string) error {
 
 func DecryptFile(filePath string, privateKeyHex string) (err error) {
 	var keySize int64 = 258
+	var eachEncryptLen int64 = 20971552
 	f, err := os.Open(filePath)
 	if err != nil {
 		return fmt.Errorf("failed to open file: %v", err)
@@ -110,13 +113,15 @@ func DecryptFile(filePath string, privateKeyHex string) (err error) {
 	writer := bufio.NewWriter(decryptedFile)
 
 	dataSize := fileSize - keySize
-	forNum := dataSize / int64(eachEncryptLen) // encryption number
-	if dataSize%int64(eachEncryptLen) != 0 {
+	forNum := dataSize / eachEncryptLen // encryption number
+	if dataSize%eachEncryptLen != 0 {
 		forNum++
 	}
 
 	_, err = f.Seek(0, os.SEEK_SET)
 	buffer := make([]byte, eachEncryptLen)
+
+	bar := progressbar.Default(forNum)
 
 	for i := int64(0); i < forNum; i++ {
 		if i == forNum-1 { // Last iteration
@@ -132,6 +137,7 @@ func DecryptFile(filePath string, privateKeyHex string) (err error) {
 		}
 		writer.Write(decryptedData)
 		writer.Flush()
+		bar.Add(1)
 	}
 	decryptedFileInfo, _ := decryptedFile.Stat()
 	fmt.Printf("File decryption successful. Decrypted file name: %s, File size: %v bytes \n", decryptedFileInfo.Name(), decryptedFileInfo.Size())
