@@ -90,9 +90,9 @@ func EncryptByAes(data, pwdKey []byte) (string, error) {
 }
 
 // DecryptByAes Aes 解密
-func DecryptByAes(data string, pwdKey []byte) ([]byte, error) {
+func DecryptByAes(data, pwdKey []byte) ([]byte, error) {
 	//dataByte, err := base64.StdEncoding.DecodeString(data)
-	dataByte, err := hex.DecodeString(data)
+	dataByte, err := hex.DecodeString(string(data))
 	if err != nil {
 		return nil, err
 	}

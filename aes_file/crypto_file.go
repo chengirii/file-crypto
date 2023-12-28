@@ -11,142 +11,129 @@ import (
 	"strings"
 )
 
-// 更新 文件 的加解密
-const PublicKey = "024a55ffd7ccf15b215867b4a59ee8743864bffb0cb29ff833684da1f24ce5e9fe"
-const PrivateKey = "a961c408cc51e0cfc676c6d40048fcb2b9e88b5fe062fb07e1868cb852c294ac" // 确保私钥不能泄露
+const (
+	eachEncryptLen   = 1024 * 1024 * 100 // Unencrypted 1 byte, encrypted to 32 bytes  100MB
+	aesKeySize       = 32
+	encryptedFileExt = ".cc"
+	decryptedFileExt = "decrypted_"
+)
 
-// EncryptFile 文件加密，filePath 需要加密的文件路径 ，fName加密后文件名
-func EncryptFile(filePath string) (err error) {
+func EncryptFile(filePath string, publicKeyHex string) error {
 	f, err := os.Open(filePath)
 	if err != nil {
-		fmt.Println("未找到文件")
-		return
+		return fmt.Errorf("failed to open file: %v", err)
 	}
 	defer f.Close()
-	// 16,24,32位字符串的话，分别对应AES-128，AES-192，AES-256 加密方法
-	PwdKey := make([]byte, 32)
-	rand.Read(PwdKey)
+	fileInfo, _ := f.Stat()
+	fileSize := fileInfo.Size()
+	fmt.Println("File size to be encrypted:", fileSize, "bytes")
 
-	fInfo, _ := f.Stat()
-	fLen := fInfo.Size()
-	fmt.Println("待处理文件大小:", fLen, "Byte")
-	maxLen := 1024 * 1024 * 100 //未加密1byte加密后为32byte
-	var forNum int64 = 0
-	getLen := fLen
-
-	if fLen > int64(maxLen) {
-		getLen = int64(maxLen)
-		forNum = fLen / int64(maxLen)
-		fmt.Println("需要解密次数：", forNum+1)
+	forNum := fileSize / int64(eachEncryptLen) // encryption number
+	if fileSize%int64(eachEncryptLen) != 0 {
+		forNum++
 	}
 	//加密后存储的文件
-	ff, err := os.OpenFile(filepath.Base(filePath)+".cc", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+	encryptedFilePath := filepath.Base(filePath) + encryptedFileExt
+	encryptedFile, err := os.Create(encryptedFilePath)
 	if err != nil {
-		fmt.Println("文件写入错误")
-		return err
+		return fmt.Errorf("failed to create encrypted file: %v", err)
 	}
-	defer ff.Close()
-	buf := bufio.NewWriter(ff)
-	//循环加密，并写入文件
-	for i := 0; i < int(forNum+1); i++ {
-		a := make([]byte, getLen)
-		n, err := f.Read(a)
-		if err != nil {
-			fmt.Println("文件读取错误")
-			return err
-		}
-		getByte, err := EncryptByAes(a[:n], PwdKey)
-		if err != nil {
-			fmt.Println("加密错误")
-			return err
-		}
-		buf.WriteString(getByte[:])
-		buf.Flush()
-	}
+	defer encryptedFile.Close()
+
+	writer := bufio.NewWriter(encryptedFile)
+
 	// AES密钥加密
-	fmt.Println(hex.EncodeToString(PwdKey), "加密前的AES密钥")
-	publicKey, _ := ecies.NewPublicKeyFromHex(PublicKey)
-	cryptoPwdKey, _ := ecies.Encrypt(publicKey, PwdKey)
-	fmt.Println(hex.EncodeToString(cryptoPwdKey), "加密后的AES密钥")
-	buf.WriteString(hex.EncodeToString(cryptoPwdKey))
-	buf.Flush()
-	ffInfo, _ := ff.Stat()
-	fmt.Printf("文件加密成功，生成文件名为：%s，文件大小为：%v Byte \n", ffInfo.Name(), ffInfo.Size())
+	aesKey := make([]byte, aesKeySize)
+	rand.Read(aesKey)
+
+	// AES encryption Data
+	// For 16, 24, and 32-bit strings, they correspond to AES-128, AES-192, and AES-256 encryption methods, respectively
+
+	buffer := make([]byte, eachEncryptLen)
+	for i := int64(0); i < forNum; i++ {
+		n, err := f.Read(buffer)
+		if err != nil {
+			return fmt.Errorf("failed to read file: %v", err)
+		}
+		encryptedData, err := EncryptByAes(buffer[:n], aesKey)
+		if err != nil {
+			return fmt.Errorf("failed to encrypt data: %v", err)
+		}
+		writer.WriteString(encryptedData)
+		writer.Flush()
+
+	}
+	// writer Last
+	publicKey, _ := ecies.NewPublicKeyFromHex(publicKeyHex)
+	cryptoPwdKey, _ := ecies.Encrypt(publicKey, aesKey)
+	writer.WriteString(hex.EncodeToString(cryptoPwdKey))
+	writer.Flush()
+
+	encryptedFileInfo, _ := encryptedFile.Stat()
+	fmt.Printf("File encryption successful. Encrypted file name: %s, File size: %v bytes \n", encryptedFilePath, encryptedFileInfo.Size())
 	return nil
 }
 
-func DecryptFile(filePath string) (err error) {
-	var p int64 = 258
+func DecryptFile(filePath string, privateKeyHex string) (err error) {
+	var keySize int64 = 258
 	f, err := os.Open(filePath)
 	if err != nil {
-		fmt.Println("未找到文件")
-		return
+		return fmt.Errorf("failed to open file: %v", err)
 	}
 	defer f.Close()
-	fInfo, _ := f.Stat()
-	fLen := fInfo.Size()
-	fmt.Println("待处理文件大小:", fLen, "Byte")
-	maxLen := 1024 * 1024 * 100 * 32
-	var forNum int64 = 0
-	getLen := fLen - p
+	fileInfo, _ := f.Stat()
+	fileSize := fileInfo.Size()
+	fmt.Println("File size to be decrypted:", fileSize, "bytes")
 
-	// 从文件末尾倒退128个字节，读取加密的AES密钥
-	_, err = f.Seek(-p, os.SEEK_END)
+	if fileSize < keySize {
+		return fmt.Errorf("file is too small to contain the AES key")
+	}
+	aesKeyBytes := make([]byte, keySize)
+	_, err = f.ReadAt(aesKeyBytes, fileSize-keySize)
 	if err != nil {
-		fmt.Println("无法将文件指针移到文件末尾：", err)
-		return
+		return fmt.Errorf("failed to read AES key: %v", err)
 	}
-	// 读取128个字节的内容
-	PwdKeyBytes := make([]byte, p)
-	_, err = f.Read(PwdKeyBytes)
+
+	aesKeyBytes, _ = hex.DecodeString(string(aesKeyBytes))
+	privateKey, _ := ecies.NewPrivateKeyFromHex(privateKeyHex)
+	aesKey, err := ecies.Decrypt(privateKey, aesKeyBytes)
 	if err != nil {
-		fmt.Println("读取文件时出错：", err)
-		return
+		return fmt.Errorf("decrypt aes fail : %v", err)
 	}
-	// 将读取到的密钥转换为[]byte类型
-	fmt.Println(string(PwdKeyBytes), "解密前的AES密钥")
-	PwdKeyBytes, _ = hex.DecodeString(string(PwdKeyBytes))
-	privateKey, _ := ecies.NewPrivateKeyFromHex(PrivateKey)
-	PwdKey, _ := ecies.Decrypt(privateKey, PwdKeyBytes)
-
-	fmt.Println(hex.EncodeToString(PwdKey), "解密后的AES密钥")
-	if fLen > int64(maxLen) {
-		getLen = int64(maxLen)
-		forNum = fLen / int64(maxLen)
-
-		fmt.Println("需要解密次数：", forNum+1)
-	}
-
-	ff, err := os.OpenFile("decryptFile_"+strings.TrimSuffix(filepath.Base(filePath), ".cc"), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0666)
+	decryptedFilePath := decryptedFileExt + strings.TrimSuffix(filepath.Base(filePath), encryptedFileExt)
+	decryptedFile, err := os.Create(decryptedFilePath)
 	if err != nil {
-		fmt.Println("文件写入错误")
-		return err
+		return fmt.Errorf("failed to create decrypted file: %v", err)
 	}
-	defer ff.Close()
-	num := 0
-	//循环加密，并写入文件
-	// 将文件指针移到文件开始位置
+	defer decryptedFile.Close()
+
+	writer := bufio.NewWriter(decryptedFile)
+
+	dataSize := fileSize - keySize
+	forNum := dataSize / int64(eachEncryptLen) // encryption number
+	if dataSize%int64(eachEncryptLen) != 0 {
+		forNum++
+	}
+
 	_, err = f.Seek(0, os.SEEK_SET)
-	buf := bufio.NewWriter(ff)
-	for i := 0; i < int(forNum+1); i++ {
-		a := make([]byte, getLen)
-		n, err := f.Read(a)
-		if err != nil {
-			fmt.Println("文件读取错误")
-			return err
-		}
-		getByte, err := DecryptByAes(string(a[:n]), PwdKey)
-		if err != nil {
-			fmt.Println("解密错误")
-			return err
-		}
+	buffer := make([]byte, eachEncryptLen)
 
-		buf.WriteString(string(getByte[:]))
-		buf.Flush()
-		num++
+	for i := int64(0); i < forNum; i++ {
+		if i == forNum-1 { // Last iteration
+			buffer = make([]byte, dataSize%eachEncryptLen)
+		}
+		n, err := f.Read(buffer)
+		if err != nil {
+			return fmt.Errorf("failed to read file: %v", err)
+		}
+		decryptedData, err := DecryptByAes(buffer[:n], aesKey)
+		if err != nil {
+			return fmt.Errorf("failed to decrypt data: %v", err)
+		}
+		writer.Write(decryptedData)
+		writer.Flush()
 	}
-	fmt.Println("解密次数：", num)
-	ffInfo, _ := ff.Stat()
-	fmt.Printf("文件解密成功，生成文件名为：%s，文件大小为：%v Byte \n", ffInfo.Name(), ffInfo.Size())
-	return
+	decryptedFileInfo, _ := decryptedFile.Stat()
+	fmt.Printf("File decryption successful. Decrypted file name: %s, File size: %v bytes \n", decryptedFileInfo.Name(), decryptedFileInfo.Size())
+	return nil
 }
